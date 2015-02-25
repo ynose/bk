@@ -1,0 +1,306 @@
+<job>
+<script language="vbscript" src="./lib/bk_initialize.vbs"/>
+<script language="vbscript" src="./lib/bk_add.vbs"/>
+<script language="vbscript" src="./lib/bk_status.vbs"/>
+<script language="vbscript" src="./lib/bk_tracked.vbs"/>
+<script language="vbscript" src="./lib/bk_commit.vbs"/>
+<!--<script language="vbscript" src="./lib/bk_reset.vbs"/>-->
+<script language="vbscript" src="./lib/bk_log.vbs"/>
+<script language="vbscript" src="./lib/bk_df.vbs"/>
+<script language="vbscript">
+ 
+Option Explicit
+
+Const DEBUGMODE = true
+Const WORK_DIR = ".\"           ' ワーキングディレクトリ
+Const REPOSITORY = ".bk"    
+Const REPOSITORY_DIR = ".\.bk"  ' リポジトリディレクトリ
+Const RESETUNDO_DIR = ".\.bk\.reset_undo"  ' WORK_DIR & REPOSITORY & RESETUNDO
+Const TRACKFILE = ".track"      ' トラックファイル
+
+Const ECHO = True
+Const NOECHO = False
+
+' OpenTextFile
+Const ForReading = 1    ' 読み取りモード
+Const ForWriting = 2    ' 上書きモード
+Const ForAppending = 8  ' 追記モード
+
+' スクリプトパス
+Dim strScriptPath
+' コマンド
+Dim objParm, strCmd, strCmdTarget
+' ファイルシステム
+Dim objFileSys
+
+
+Call Main
+
+' Main   ------------------------------------------------------------------------------------------
+Sub Main
+    strScriptPath = Replace(WScript.ScriptFullName, WScript.ScriptName, "")
+    Set objFileSys = CreateObject("Scripting.FileSystemObject")
+
+    Set objParm = Wscript.Arguments
+    If objParm.Count > 0 Then
+        strCmd = LCase(objParm(0))
+    Else
+        Call CommandDocument
+        Exit Sub
+    End If
+
+    ' コマンドの振り分け
+    Select Case strCmd
+        Case "init"
+            Call Initialize
+        Case "add"
+            Call addTrackfile
+        Case "tracked"
+            Call Tracked
+        Case "status"
+            Call Status
+        Case "commit"
+            Call Commit
+'        Case "reset"
+'            Call CommitReset
+        Case "log"
+            Call CommitLog
+        Case "df"
+            Call ExecDf
+        Case Else
+            EchoError "Unknown"
+    End Select
+
+    Set objFileSys = Nothing
+End Sub
+
+
+' Command Document  -------------------------------------------------------------------------------
+Sub CommandDocument
+    WScript.echo "BK Command"
+    WScript.echo "  init    - リポジトリの初期化"
+    WScript.echo "  add     - 管理対象ファイルを追加"
+    WScript.echo "  tracked - 管理対象ファイルの確認"
+    WScript.echo "  status  - 最終コミットからの変更を表示"
+    WScript.echo "  commit  - 管理対象ファイルをコミット"
+'    WScript.echo "  reset   - 管理対象ファイルをコミットから戻す"
+    WScript.echo "  log     - コミットログの表示"
+    WScript.echo "  df      - 最終コミットからの変更をDF.exeで表示"
+End Sub
+
+' リポジトリの一覧を取得
+Function GetRepositories
+
+    Dim objArrayList: Set objArrayList = CreateObject("System.Collections.ArrayList")
+
+    If objFileSys.FolderExists(REPOSITORY_DIR) Then
+        ' フォルダ名をArrayListに格納する
+        Dim objFolder: Set objFolder = objFileSys.GetFolder(REPOSITORY_DIR)
+        Dim objItem
+        For Each objItem In objFolder.SubFolders
+            objArrayList.Add objItem.Name
+        Next
+    End If
+
+    ' Return
+    Set GetRepositories = objArrayList
+
+End Function
+
+' リポジトリを最終コミットからの相対位置で取得する
+Function GetHEADRepositoryOffset(offset)
+
+    Dim objRepositories: Set objRepositories = GetRepositories()
+
+    If objRepositories.Count > offset Then
+        objRepositories.Reverse()   ' 降順ソート
+        
+        ' Return
+        GetHEADRepositoryOffset = objRepositories(offset)
+    Else
+        ' Return
+        GetHEADRepositoryOffset = ""
+    End If
+
+End Function
+
+' リポジトリから最終コミットを取得
+Function GetHEADRepository
+
+    GetHEADRepository = GetHEADRepositoryOffset(0)
+
+End Function
+
+' リポジトリのフォルダ名を分解してコミットログを生成する
+Function CreateCommitLog(strRepository)
+
+    Dim logs:       logs = Split(strRepository, "_")
+    Dim logDate:    logDate = DateSerial(Mid(logs(0), 1, 4), Mid(logs(0), 5, 2), Mid(logs(0), 7, 2))
+    Dim logTime:    logTime = TimeSerial(Mid(logs(1), 1, 2), Mid(logs(1), 3, 2), Mid(logs(1), 5, 2))
+    Dim logMessage: logMessage = logs(2)
+
+    ' 分解されてしまったコミットメッセージを復元する
+    Dim i
+    For i = 3 To UBound(logs)
+        logMessage = logMessage & "_" & logs(i)
+    Next
+
+    ' Return
+    CreateCommitLog = LogFormatDateTime(logDate + logTime) & " - " & logMessage
+
+End Function
+
+' 日付をコミットログ用の書式にする
+' yyyy/mm/dd(曜) hh:mm:ss
+Function LogFormatDateTime(d)
+    ' Return
+    LogFormatDateTime = FormatDateTime(d, 2) & "(" & WeekdayChar(Weekday(d)) & ") " & Right("0" &  FormatDateTime(d, 3), 8)
+    
+End function
+
+' コミットログ用の曜日
+Function WeekdayChar(w)
+
+    Dim weekdays(7)
+    weekdays(1) = "日"
+    weekdays(2) = "月"
+    weekdays(3) = "火"
+    weekdays(4) = "水"
+    weekdays(5) = "木"
+    weekdays(6) = "金"
+    weekdays(0) = "土"
+    
+    ' Return
+    WeekdayChar = weekdays(w)
+    
+End Function
+
+Sub ShellRun(command, opt)
+
+    Dim WshShell: Set WshShell = WScript.CreateObject("WScript.Shell")
+    WshShell.Run command, opt
+    WScript.sleep(1) ' 少しスリープを入れないと後続処理でエラーになる場合がある
+    Set WshShell = Nothing
+
+End Sub
+
+' フォルダを作成する
+Function CreateFolder(dir)
+
+    ' フォルダが無かったら作成する
+    If objFileSys.FolderExists(dir) = False Then
+        objFileSys.CreateFolder(dir)
+	    If objFileSys.FolderExists(dir) Then
+            ' Return
+	        CreateFolder = True
+	    Else
+	        ' Return
+	        CreateFolder = False
+	    End If
+	Else
+            ' Return
+	        CreateFolder = True
+    End If
+
+End Function
+
+' フォルダを削除する
+Function DeleteFolder(dir)
+
+    ' フォルダがあったら削除する
+    If objFileSys.FolderExists(dir) = True Then
+        objFileSys.DeleteFolder(dir)
+	    If objFileSys.FolderExists(dir) = False Then
+            ' Return
+	        DeleteFolder = True
+	    Else
+	        ' Return
+	        DeleteFolder = False
+	    End If
+	Else
+            ' Return
+	        DeleteFolder = True
+    End If
+
+End Function
+
+' コンソール出力用
+Sub EchoSuccess(str)
+    WScript.echo str
+End Sub
+
+Sub EchoUsage(str)
+    WScript.echo "Usage: " & str
+End Sub
+
+Sub EchoError(str)
+    WScript.echo "Error: " & str
+End Sub
+
+
+' デバッグ用
+Sub DebugPrint(str)
+    If DEBUGMODE Then
+        WScript.echo "Degbug:" & str
+    End If
+End Sub
+
+' ファイルをArrayListに読み込む
+Class FileReadArrayList
+    Private objSuper
+
+    Private Sub Class_Initialize()
+        Set objSuper = CreateObject("System.Collections.ArrayList")
+    End Sub
+
+    Private Sub Class_Terminate
+         Set objSuper = Nothing
+     End Sub
+
+    Public Function GetInstance
+        Set GetInstance = objSuper
+    End Function
+    
+    Public Sub ReadFile(filepath)
+        Dim objFile: Set objFile = objFileSys.OpenTextFile(filepath, ForReading, true)
+
+        objSuper.Clear
+        Do Until objFile.AtEndOfStream      ' 入力ファイルの終端まで繰り返し
+            objSuper.Add objFile.ReadLine
+        Loop
+
+        objFile.Close
+        Set objFile = Nothing
+    End Sub
+
+End Class
+
+' ファイルパス用正規表現
+Class RegExpForFilePath
+    Private objSuper
+
+    Private Sub Class_Initialize()
+        Set objSuper = CreateObject("VBScript.RegExp")
+        objSuper.IgnoreCase = True ' 大文字小文字を区別しない
+    End Sub
+
+    Private Sub Class_Terminate
+         Set objSuper = Nothing
+     End Sub
+
+    Public Function GetInstance
+        Set GetInstance = objSuper
+    End Function
+
+    Public Property Let FilePaths(pathArrayList)
+        Dim strPattern: strPattern = "(" & Join(pathArrayList.ToArray, ")|(") & ")"
+        strPattern = Replace(strPattern, "\", "\\")   ' エスケープ
+        strPattern = Replace(strPattern, ".", "\.")   ' エスケープ
+        objSuper.Pattern = strPattern
+'        EchoSuccess objSuper.Pattern
+    End Property
+    
+End Class
+
+</script>
+</job>

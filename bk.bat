@@ -1,1 +1,1 @@
-@cscript %~dp0bk.vbs //Nologo %*
+@cscript %~dp0bk.wsf //Nologo %*
